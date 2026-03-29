@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MuseScore 4 → 3 変換ツール</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body { font-family: sans-serif; text-align: center; background-color: #f4f7f6; padding: 30px 10px; margin: 0; }
+        .container { max-width: 600px; margin: 0 auto; background: white; padding: 20px; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); box-sizing: border-box; }
+        h2 { font-size: 1.5em; color: #333; }
+        p { font-size: 0.9em; color: #666; line-height: 1.5; }
+        .drop-zone { border: 2px dashed #007bff; border-radius: 10px; padding: 40px 20px; cursor: pointer; color: #555; transition: background 0.3s; margin-bottom: 20px; background-color: #f9feff; }
+        .drop-zone:hover, .drop-zone.dragover { background: #e9f5ff; border-color: #0056b3; }
+        #status { margin-top: 20px; font-weight: bold; font-size: 1em; padding: 10px; border-radius: 5px; min-height: 1.2em; }
+        /* スマホ向けに少しレイアウトを調整 */
+        @media (max-width: 480px) { body { padding: 10px; } .container { padding: 15px; } .drop-zone { padding: 30px 10px; font-size: 0.9em; } }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>MuseScore 4 → 3 変換ツール</h2>
+    <p>MuseScore 4で作成された「.mscz」ファイルを選んでください。<br>※ファイルはサーバーに送信されず、お使いの端末内でのみ安全に処理されます。</p>
+
+    <div class="drop-zone" id="dropZone">
+        ここに .mscz ファイルをドロップ<br>またはクリックして選択
+        <input type="file" id="fileInput" accept=".mscz" style="display: none;">
+    </div>
+
+    <div id="status"></div>
+</div>
+
+<script>
+    const dropZone = document.getElementById('dropZone');
+    const fileInput = document.getElementById('fileInput');
+    const statusMsg = document.getElementById('status');
+
+    // クリックでファイル選択
+    dropZone.addEventListener('click', () => fileInput.click());
+
+    // ドラッグ＆ドロップの見た目制御
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', (e) => {
+        e.preventDefault();
+        dropZone.classList.remove('dragover');
+        if (e.dataTransfer.files.length > 0) processFile(e.dataTransfer.files[0]);
+    });
+
+    fileInput.addEventListener('change', (e) => {
+        if (e.target.files.length > 0) processFile(e.target.files[0]);
+    });
+
+    // メインの変換処理
+    async function processFile(file) {
+        if (!file.name.endsWith('.mscz')) {
+            showStatus('red', 'エラー：.mscz ファイルを選択してください。');
+            fileInput.value = ''; // ファイル選択状態を完全にクリア
+            return;
+        }
+
+        showStatus('#007bff', '変換中...');
+
+        try {
+            // 1. ZIP(mscz)の読み込み
+            const zip = await JSZip.loadAsync(file);
+            
+            // 2. container.xml の読み込みと mscx パスの特定
+            const containerEntry = zip.file("META-INF/container.xml");
+            if (!containerEntry) throw new Error("META-INF/container.xml が見つかりません。");
+
+            const containerXmlStr = await containerEntry.async("string");
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(containerXmlStr, "text/xml");
+            const rootfiles = xmlDoc.getElementsByTagName("rootfile");
+            
+            let mscxPath = null;
+            for (let i = 0; i < rootfiles.length; i++) {
+                const path = rootfiles[i].getAttribute("full-path");
+                if (path && path.toLowerCase().endsWith(".mscx")) {
+                    mscxPath = path;
+                    break;
+                }
+            }
+
+            if (!mscxPath) throw new Error("楽譜本体(.mscx)が見つかりません。");
+
+            // すでに MuseScore 3 のファイルでないかバージョンチェック
+            let mscxContent = await zip.file(mscxPath).async("string");
+            if (mscxContent.includes('programVersion="3.')) {
+                 showStatus('green', 'このファイルはすでに MuseScore 3 用です。変換は不要です。');
+                 fileInput.value = ''; // 処理終了後にリセット
+                 return;
+            }
+
+            // 3. mscx ファイルの内容を書き換え
+            mscxContent = mscxContent.replace(/<style>([a-z])([^<]*)<\/style>/g, (m, p1, p2) => `<style>${p1.toUpperCase()}${p2}</style>`);
+            mscxContent = mscxContent.replace(/<concertKey>([^<]*)<\/concertKey>/g, '<accidental>$1</accidental>');
+            mscxContent = mscxContent.replace(/(<museScore\b[^>]*version=)"[^"]*"/g, '$1"3.02"');
+            mscxContent = mscxContent.replace(/<programVersion>[^<]*<\/programVersion>/g, '<programVersion>3.6.2</programVersion>');
+            mscxContent = mscxContent.replace(/<programRevision>[^<]*<\/programRevision>/g, '<programRevision>3224f34</programRevision>');
+
+            // 4. 新しい container.xml を作成
+            const newContainerXml = `<?xml version="1.0" encoding="UTF-8"?>\n<container>\n  <rootfiles>\n    <rootfile full-path="${mscxPath}"/>\n  </rootfiles>\n</container>`;
+
+            // 5. 新しい ZIP(mscz) の作成
+            const newZip = new JSZip();
+            newZip.file(mscxPath, mscxContent);
+            newZip.file("META-INF/container.xml", newContainerXml);
+
+            // 6. ダウンロード処理
+            const zipContentBlob = await newZip.generateAsync({ type: "blob", compression: "DEFLATE" });
+            const content = new Blob([zipContentBlob], { type: "application/octet-stream" });
+
+            const downloadUrl = URL.createObjectURL(content);
+            const a = document.createElement("a");
+            
+            // 元のファイル名に _msc3 を付けてダウンロード
+            const baseName = file.name.replace(/\.mscz$/i, '').replace(/\.zip$/i, '');
+            a.href = downloadUrl;
+            a.download = `${baseName}_msc3.mscz`;
+            document.body.appendChild(a);
+            a.click();
+            
+            // Safari向けに少し遅延させてクリーンアップ
+            setTimeout(() => {
+                document.body.removeChild(a);
+                URL.revokeObjectURL(downloadUrl);
+                fileInput.value = ''; // ダウンロード完了後にもリセットし、続けて同じファイルを変換できるようにする
+            }, 100);
+
+            showStatus('green', '変換完了！ダウンロードが開始されました。');
+
+        } catch (error) {
+            console.error(error);
+            showStatus('red', 'エラーが発生しました: ' + error.message);
+            fileInput.value = ''; // エラー発生時もリセット
+        }
+    }
+
+    // ステータス表示の共通関数
+    function showStatus(color, message) {
+        statusMsg.style.color = color;
+        statusMsg.innerText = message;
+        // エラーか完了の場合は背景色をつけて分かりやすく
+        if (color === 'red') {
+            statusMsg.style.backgroundColor = '#fff2f2';
+        } else if (color === 'green') {
+            statusMsg.style.backgroundColor = '#f2fff2';
+        } else {
+            statusMsg.style.backgroundColor = 'transparent';
+        }
+    }
+</script>
+
+</body>
+</html>
