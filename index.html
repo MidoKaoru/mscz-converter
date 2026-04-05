@@ -13,6 +13,18 @@
         .drop-zone { border: 2px dashed #007bff; border-radius: 10px; padding: 40px 20px; cursor: pointer; color: #555; transition: background 0.3s; margin-bottom: 20px; background-color: #f9feff; }
         .drop-zone:hover, .drop-zone.dragover { background: #e9f5ff; border-color: #0056b3; }
         #status { margin-top: 20px; font-weight: bold; font-size: 1em; padding: 10px; border-radius: 5px; min-height: 1.2em; }
+        /* デバッグUI (DEBUG=true のときのみ表示) */
+        #logPanel { display: none; margin-top: 16px; text-align: left; }
+        #logPanel summary { cursor: pointer; font-weight: bold; font-size: 0.9em; color: #555; padding: 6px 0; user-select: none; }
+        #logOutput { background: #1e1e1e; color: #d4d4d4; font-family: monospace; font-size: 0.78em; padding: 12px; border-radius: 6px; max-height: 300px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; margin-top: 6px; }
+        #logOutput .log-info  { color: #9cdcfe; }
+        #logOutput .log-ok    { color: #4ec9b0; }
+        #logOutput .log-warn  { color: #dcdcaa; }
+        #logOutput .log-error { color: #f48771; }
+        #copyLogBtn { margin-top: 8px; padding: 5px 14px; font-size: 0.8em; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; }
+        .ref-zone { border: 2px dashed #28a745; border-radius: 10px; padding: 20px; cursor: pointer; color: #555; transition: background 0.3s; margin-top: 20px; background-color: #f6fff8; font-size: 0.9em; }
+        .ref-zone:hover, .ref-zone.dragover { background: #e6ffed; border-color: #1a7a32; }
+        #refStatus { margin-top: 8px; font-size: 0.85em; font-weight: bold; min-height: 1.2em; }
         /* スマホ向けに少しレイアウトを調整 */
         @media (max-width: 480px) { body { padding: 10px; } .container { padding: 15px; } .drop-zone { padding: 30px 10px; font-size: 0.9em; } }
     </style>
@@ -29,132 +41,568 @@
     </div>
 
     <div id="status"></div>
+
+    <!-- デバッグ用ログパネル (DEBUG=true のときのみ表示される) -->
+    <details id="logPanel">
+        <summary>解析ログ</summary>
+        <div id="logOutput"></div>
+        <button id="copyLogBtn" onclick="copyLog()">ログをコピー</button>
+    </details>
 </div>
-<div style="margin-top: 30px; font-size: 0.8em; color: #888; border-top: 1px solid #eee; padding-top: 15px;"> 
-    <p>🔒 <b>プライバシーについて</b><br> このツールは完全にブラウザ内部で動作し、楽譜データが外部サーバーに送信・保存されることは一切ありません。<br> 
-        透明性を保つため、処理の内容はすべて <a href="https://github.com/MidoKaoru/mscz-converter" target="_blank" rel="noopener noreferrer" style="color: #007bff; text-decoration: none;">GitHubでソースコードを公開</a> しています。</p> 
+
+<!-- デバッグ用 MS3参照ファイル解析セクション (DEBUG=true のときのみ表示される) -->
+<div class="container" id="refSection" style="margin-top: 20px; display: none;">
+    <h2 style="font-size: 1.2em; color: #28a745;">MS3参照ファイル解析 &amp; 差分比較</h2>
+    <p>正常に開けるMuseScore 3のファイルをここに読み込むと、変換済みファイルとの構造差分をログに出力します。<br>先に上の変換を実行してからご利用ください。</p>
+    <div class="ref-zone" id="refDropZone">
+        比較用の MS3 .mscz ファイルをドロップ<br>またはクリックして選択
+        <input type="file" id="refFileInput" accept=".mscz" style="display: none;">
+    </div>
+    <div id="refStatus"></div>
+</div>
+
+<div style="margin-top: 30px; font-size: 0.8em; color: #888; border-top: 1px solid #eee; padding-top: 15px;">
+    <p>🔒 <b>プライバシーについて</b><br> このツールは完全にブラウザ内部で動作し、楽譜データが外部サーバーに送信・保存されることは一切ありません。<br>
+        透明性を保つため、処理の内容はすべて <a href="https://github.com/MidoKaoru/mscz-converter" target="_blank" rel="noopener noreferrer" style="color: #007bff; text-decoration: none;">GitHubでソースコードを公開</a> しています。</p>
 </div>
 
 <script>
-    const dropZone = document.getElementById('dropZone');
+    // =====================================================================
+    // デバッグフラグ
+    // 原因調査が必要なときは true に変更するとログパネルと参照ファイル解析が有効になる
+    // =====================================================================
+    const DEBUG = false;
+
+    // DEBUGモードのときだけ各UIを表示
+    if (DEBUG) {
+        document.getElementById('refSection').style.display = 'block';
+    }
+
+    const dropZone  = document.getElementById('dropZone');
     const fileInput = document.getElementById('fileInput');
     const statusMsg = document.getElementById('status');
+    const logPanel  = document.getElementById('logPanel');
+    const logOutput = document.getElementById('logOutput');
 
-    // クリックでファイル選択
+    // =========================================================
+    // ログユーティリティ (DEBUG=false のとき完全なno-op)
+    // =========================================================
+    const logLines = [];
+
+    function log(level, msg) {
+        if (!DEBUG) return;
+        const ts = new Date().toISOString().replace('T', ' ').slice(0, 23);
+        const text = `[${ts}] ${msg}`;
+        logLines.push(text);
+        console[level === 'error' ? 'error' : level === 'warn' ? 'warn' : 'log'](text);
+        const span = document.createElement('span');
+        span.className = `log-${level}`;
+        span.textContent = text + '\n';
+        logOutput.appendChild(span);
+        logOutput.scrollTop = logOutput.scrollHeight;
+    }
+    const logInfo  = msg => log('info',  msg);
+    const logOk    = msg => log('ok',    msg);
+    const logWarn  = msg => log('warn',  msg);
+    const logError = msg => log('error', msg);
+
+    function resetLog() {
+        if (!DEBUG) return;
+        logLines.length = 0;
+        logOutput.innerHTML = '';
+        logPanel.style.display = 'block';
+        logPanel.open = true;
+    }
+
+    function copyLog() {
+        navigator.clipboard.writeText(logLines.join('\n'))
+            .then(() => alert('ログをクリップボードにコピーしました。'))
+            .catch(() => alert('コピーに失敗しました。手動でログを選択してください。'));
+    }
+
+    // =========================================================
+    // デバッグ用ヘルパー関数 (DEBUG=false のとき早期リターン)
+    // =========================================================
+
+    // 先頭200文字と文字コードをログ出力
+    function logContentHead(content, label) {
+        if (!DEBUG) return;
+        const code0 = content.charCodeAt(0);
+        const head  = content.slice(0, 200).replace(/\n/g, '↵').replace(/\r/g, '↲');
+        logInfo(`  [${label}] 先頭charCode=${code0}(0x${code0.toString(16).toUpperCase()}) 先頭200字: ${head}`);
+    }
+
+    // 指定ステップ後のXML妥当性チェック
+    function checkXml(content, step) {
+        if (!DEBUG) return true;
+        const doc = new DOMParser().parseFromString(content, 'text/xml');
+        const err = doc.querySelector('parsererror');
+        if (err) {
+            logError(`  [${step}] 後にXMLパースエラー発生:\n    ${err.textContent.trim().slice(0, 300)}`);
+            return false;
+        }
+        logOk(`  [${step}] XML妥当性OK`);
+        return true;
+    }
+
+    // =========================================================
+    // ドラッグ＆ドロップ／ファイル選択
+    // =========================================================
     dropZone.addEventListener('click', () => fileInput.click());
-
-    // ドラッグ＆ドロップの見た目制御
-    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('dragover'); });
-    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
-    dropZone.addEventListener('drop', (e) => {
+    dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+    dropZone.addEventListener('dragleave', ()  => dropZone.classList.remove('dragover'));
+    dropZone.addEventListener('drop', e => {
         e.preventDefault();
         dropZone.classList.remove('dragover');
         if (e.dataTransfer.files.length > 0) processFile(e.dataTransfer.files[0]);
     });
-
-    fileInput.addEventListener('change', (e) => {
+    fileInput.addEventListener('change', e => {
         if (e.target.files.length > 0) processFile(e.target.files[0]);
     });
 
+    // =========================================================
     // メインの変換処理
+    // =========================================================
     async function processFile(file) {
         if (!file.name.endsWith('.mscz')) {
             showStatus('red', 'エラー：.mscz ファイルを選択してください。');
-            fileInput.value = ''; // ファイル選択状態を完全にクリア
+            fileInput.value = '';
             return;
         }
+
+        resetLog();
+        logInfo(`=== 変換開始 ===`);
+        logInfo(`ファイル名: ${file.name}`);
+        logInfo(`ファイルサイズ: ${file.size.toLocaleString()} bytes`);
 
         showStatus('#007bff', '変換中...');
 
         try {
             // 1. ZIP(mscz)の読み込み
             const zip = await JSZip.loadAsync(file);
-            
+
+            // [DEBUG] ZIPの内容を列挙
+            if (DEBUG) {
+                const zipEntries = Object.keys(zip.files);
+                logInfo(`--- ZIPエントリ一覧 (${zipEntries.length}件) ---`);
+                zipEntries.forEach(name => {
+                    logInfo(`  ${zip.files[name].dir ? '[DIR]' : '[FILE]'} ${name}`);
+                });
+            }
+
             // 2. container.xml の読み込みと mscx パスの特定
             const containerEntry = zip.file("META-INF/container.xml");
-            if (!containerEntry) throw new Error("META-INF/container.xml が見つかりません。");
+            if (!containerEntry) {
+                // [DEBUG] 大文字小文字違いのエントリを探す
+                if (DEBUG) {
+                    const similar = Object.keys(zip.files).filter(n => n.toLowerCase() === 'meta-inf/container.xml');
+                    if (similar.length) logWarn(`大文字小文字違いのエントリが存在します: ${similar.join(', ')}`);
+                }
+                throw new Error("META-INF/container.xml が見つかりません。");
+            }
 
             const containerXmlStr = await containerEntry.async("string");
-            const parser = new DOMParser();
-            const xmlDoc = parser.parseFromString(containerXmlStr, "text/xml");
+            logInfo(`--- container.xml 内容 ---\n${containerXmlStr}`);
+
+            const xmlDoc = new DOMParser().parseFromString(containerXmlStr, "text/xml");
+            if (xmlDoc.querySelector('parsererror')) {
+                throw new Error("container.xml のパースに失敗しました。");
+            }
+
             const rootfiles = xmlDoc.getElementsByTagName("rootfile");
-            
-            let mscxPath = null;
-            for (let i = 0; i < rootfiles.length; i++) {
-                const path = rootfiles[i].getAttribute("full-path");
-                if (path && path.toLowerCase().endsWith(".mscx")) {
-                    mscxPath = path;
-                    break;
+            // [DEBUG] rootfile の一覧を出力
+            if (DEBUG) {
+                logInfo(`rootfile 要素数: ${rootfiles.length}`);
+                for (let i = 0; i < rootfiles.length; i++) {
+                    const attrs = Array.from(rootfiles[i].attributes).map(a => `${a.name}="${a.value}"`).join(' ');
+                    logInfo(`  rootfile[${i}]: ${attrs}`);
                 }
             }
 
+            let mscxPath = null;
+            for (let i = 0; i < rootfiles.length; i++) {
+                const path = rootfiles[i].getAttribute("full-path");
+                if (path && path.toLowerCase().endsWith(".mscx")) { mscxPath = path; break; }
+            }
             if (!mscxPath) throw new Error("楽譜本体(.mscx)が見つかりません。");
+            logOk(`mscx パス: "${mscxPath}"`);
 
-            // すでに MuseScore 3 のファイルでないかバージョンチェック
-            let mscxContent = await zip.file(mscxPath).async("string");
-            if (mscxContent.includes('programVersion="3.')) {
-                 showStatus('green', 'このファイルはすでに MuseScore 3 用です。変換は不要です。');
-                 fileInput.value = ''; // 処理終了後にリセット
-                 return;
+            const mscxEntry = zip.file(mscxPath);
+            if (!mscxEntry) {
+                // [DEBUG] 大文字小文字違いを探す
+                if (DEBUG) {
+                    const similar = Object.keys(zip.files).filter(n => n.toLowerCase() === mscxPath.toLowerCase());
+                    if (similar.length) logWarn(`大文字小文字違いのエントリが存在します: ${similar.join(', ')}`);
+                }
+                throw new Error(`楽譜本体 "${mscxPath}" がZIP内に見つかりません。`);
             }
 
-            // 3. mscx ファイルの内容を書き換え
-            mscxContent = mscxContent.replace(/<style>([a-z])([^<]*)<\/style>/g, (m, p1, p2) => `<style>${p1.toUpperCase()}${p2}</style>`);
-            mscxContent = mscxContent.replace(/<concertKey>([^<]*)<\/concertKey>/g, '<accidental>$1</accidental>');
-            mscxContent = mscxContent.replace(/(<museScore\b[^>]*version=)"[^"]*"/g, '$1"3.02"');
-            mscxContent = mscxContent.replace(/<programVersion>[^<]*<\/programVersion>/g, '<programVersion>3.6.2</programVersion>');
-            mscxContent = mscxContent.replace(/<programRevision>[^<]*<\/programRevision>/g, '<programRevision>3224f34</programRevision>');
+            let mscxContent = await mscxEntry.async("string");
+            logInfo(`mscx ファイルサイズ: ${mscxContent.length.toLocaleString()} 文字`);
 
-            // 4. 新しい container.xml を作成
+            if (!mscxContent || mscxContent.trim().length === 0) {
+                throw new Error("楽譜データが空です。");
+            }
+
+            // バージョンチェック (すでに MS3 ならスキップ)
+            const verMatch = mscxContent.match(/programVersion>([^<]*)</);
+            logInfo(`programVersion: ${verMatch ? verMatch[1] : '(未検出)'}`);
+            if (verMatch && verMatch[1].startsWith('3.')) {
+                showStatus('green', 'このファイルはすでに MuseScore 3 用です。変換は不要です。');
+                fileInput.value = '';
+                return;
+            }
+
+            // =========================================================
+            // [DEBUG] 置換前の事前解析
+            // =========================================================
+            if (DEBUG) {
+                logInfo('--- 置換前の事前解析 ---');
+                const preParsed = new DOMParser().parseFromString(mscxContent, 'text/xml');
+                const preParseError = preParsed.querySelector('parsererror');
+
+                // <concertKey> のコンテキストを調査（置換前に実施することが重要）
+                logInfo('  [<concertKey> コンテキスト調査]');
+                if (preParseError) {
+                    logWarn(`  元のmscxにXMLパースエラーあり: ${preParseError.textContent.trim().slice(0, 200)}`);
+                } else {
+                    const ckElements = preParsed.getElementsByTagName('concertKey');
+                    let ckInKeySig = 0, ckOutside = 0;
+                    for (let i = 0; i < ckElements.length; i++) {
+                        const parentTag = ckElements[i].parentElement ? ckElements[i].parentElement.tagName : '(不明)';
+                        if (parentTag === 'KeySig') ckInKeySig++;
+                        else ckOutside++;
+                        if (i < 3) logInfo(`    例 [${i}]: 親要素=<${parentTag}> 値="${ckElements[i].textContent}"`);
+                    }
+                    if (ckElements.length === 0) logInfo('    <concertKey>: 0件');
+                    else {
+                        if (ckInKeySig > 0) logOk(`    <KeySig>内: ${ckInKeySig}箇所 → <accidental>置換は正しい`);
+                        if (ckOutside > 0)  logWarn(`    <KeySig>以外: ${ckOutside}箇所 → 置換により問題が起きる可能性あり`);
+                    }
+                }
+
+                // 既知のMS4固有要素の検出
+                logInfo('  [MS4固有要素の検出]');
+                const ms4ElementList = [
+                    ['SoundList',        'MS4音源リスト'],
+                    ['Sound',            'MS4音源定義'],
+                    ['SoundId',          'MS4音源ID'],
+                    ['playbackProfile',  'MS4再生プロファイル'],
+                    ['instrumentId',     'MS4楽器ID'],
+                    ['musicalSymbolFont','MS4音楽記号フォント'],
+                    ['musicalTextFont',  'MS4音楽テキストフォント'],
+                    ['PartExcerpt',      'MS4パート'],
+                    ['trackChanges',     'MS4変更追跡'],
+                    ['linkedMain',       'MS4リンク'],
+                    ['preferSharpFlat',  'MS4臨時記号設定'],
+                ];
+                let ms4Found = false;
+                ms4ElementList.forEach(([tag, desc]) => {
+                    const hits = mscxContent.match(new RegExp(`<${tag}[\\s>/]`, 'g'));
+                    if (hits) { logWarn(`    <${tag}> ${hits.length}箇所: ${desc}`); ms4Found = true; }
+                });
+                if (!ms4Found) logOk('    MS4固有要素: 検出されませんでした。');
+
+                // スコア構造サマリー
+                if (!preParseError) {
+                    logInfo('  [スコア構造サマリー]');
+                    const parts   = preParsed.getElementsByTagName('Part');
+                    const staves  = preParsed.getElementsByTagName('Staff');
+                    const measures = preParsed.getElementsByTagName('Measure');
+                    logInfo(`    <Part>要素数: ${parts.length}`);
+                    for (let i = 0; i < Math.min(parts.length, 3); i++) {
+                        const nameEl  = parts[i].querySelector('Instrument > longName, Instrument > shortName, Instrument > trackName');
+                        const instrId = parts[i].querySelector('Instrument > instrumentId');
+                        logInfo(`    Part[${i}]: 名前="${nameEl ? nameEl.textContent : '(不明)'}" instrumentId="${instrId ? instrId.textContent : '(なし)'}"`);
+                    }
+                    logInfo(`    <Staff>要素数: ${staves.length} / <Measure>要素数: ${measures.length}`);
+                }
+            }
+
+            // =========================================================
+            // 3. mscx の書き換え
+            // =========================================================
+
+            // 注意: replacement に $1 等を使うときは文字列として直接 .replace() に渡すこと。
+            // コールバック関数経由で返すと $n が展開されない（JavaScript の仕様）。
+            function applyReplace(label, content, regex, replacement) {
+                if (DEBUG) {
+                    const count = (content.match(regex) || []).length;
+                    if (count > 0) logOk(`  [置換OK] ${label}: ${count}箇所`);
+                    else           logWarn(`  [未マッチ] ${label}: 0箇所`);
+                }
+                return content.replace(regex, replacement);
+            }
+
+            logInfo('--- 正規表現置換 開始 ---');
+            logContentHead(mscxContent, '置換前');
+
+            mscxContent = applyReplace('<style> 先頭文字を大文字化', mscxContent,
+                /<style>([a-z])([^<]*)<\/style>/g,
+                (m, p1, p2) => `<style>${p1.toUpperCase()}${p2}</style>`);
+            checkXml(mscxContent, '<style>大文字化');
+
+            mscxContent = applyReplace('<concertKey> → <accidental>', mscxContent,
+                /<concertKey>([^<]*)<\/concertKey>/g,
+                '<accidental>$1</accidental>');
+            checkXml(mscxContent, '<concertKey>置換');
+
+            mscxContent = applyReplace('museScore version属性を "3.02" に変更', mscxContent,
+                /(<museScore\b[^>]*version=)"[^"]*"/g,
+                '$1"3.02"');
+            checkXml(mscxContent, 'museScore version置換');
+
+            mscxContent = applyReplace('programVersion を "3.6.2" に変更', mscxContent,
+                /<programVersion>[^<]*<\/programVersion>/g,
+                '<programVersion>3.6.2</programVersion>');
+            checkXml(mscxContent, 'programVersion置換');
+
+            mscxContent = applyReplace('programRevision を "3224f34" に変更', mscxContent,
+                /<programRevision>[^<]*<\/programRevision>/g,
+                '<programRevision>3224f34</programRevision>');
+            checkXml(mscxContent, 'programRevision置換');
+
+            logInfo(`バージョン置換後 mscx サイズ: ${mscxContent.length.toLocaleString()} 文字`);
+            logContentHead(mscxContent, 'バージョン置換後');
+
+            // =========================================================
+            // 3.5. MS4固有要素のクリーンアップ
+            //
+            // MS4で追加された要素をMuseScore3が認識できないため削除する。
+            // 各要素の削除理由:
+            //   <eid>           : MS4の内部要素ID。全要素に付与されており、MS3のパーサーが誤動作する主因
+            //   <LastEID>       : museScore直下のMS4固有要素
+            //   <open>          : Score直下のMS4固有要素
+            //   <instrumentId>  : MS4の楽器識別子（MS3は longName/shortName で識別）
+            //   <singleNoteDynamics> : MS4固有の強弱設定
+            //   <preferSharpFlat>   : MS4固有の臨時記号設定
+            //   <clef>          : Instrument内のMS4固有のデフォルト音部記号指定
+            //   <family>        : テキスト要素内のMS4固有フォントファミリー指定
+            // =========================================================
+
+            // テキストのみの要素を削除するヘルパー（前後の空白ごと除去）
+            function removeLeafElements(label, content, tagName) {
+                const re = new RegExp(`\\s*<${tagName}>[^<]*<\\/${tagName}>`, 'g');
+                if (DEBUG) {
+                    const before = content.length;
+                    const result = content.replace(re, '');
+                    const removed = before - result.length;
+                    if (removed > 0) logOk(`  <${tagName}> 削除: ${removed}文字削減`);
+                    else             logInfo(`  <${tagName}>: 存在しないためスキップ`);
+                    return result;
+                }
+                return content.replace(re, '');
+            }
+
+            logInfo('--- MS4固有要素のクリーンアップ ---');
+            mscxContent = removeLeafElements('<eid>',               mscxContent, 'eid');
+            mscxContent = removeLeafElements('<LastEID>',           mscxContent, 'LastEID');
+            mscxContent = removeLeafElements('<open>',              mscxContent, 'open');
+            mscxContent = removeLeafElements('<instrumentId>',      mscxContent, 'instrumentId');
+            mscxContent = removeLeafElements('<singleNoteDynamics>',mscxContent, 'singleNoteDynamics');
+            mscxContent = removeLeafElements('<preferSharpFlat>',   mscxContent, 'preferSharpFlat');
+            mscxContent = removeLeafElements('<clef>',              mscxContent, 'clef');
+            mscxContent = removeLeafElements('<family>',            mscxContent, 'family');
+
+            logInfo(`クリーンアップ後 mscx サイズ: ${mscxContent.length.toLocaleString()} 文字`);
+            checkXml(mscxContent, 'クリーンアップ後');
+
+            // 変換後のmscxをデバッグ用参照比較のために保持
+            window._lastConvertedMscx = mscxContent;
+
+            // =========================================================
+            // 4. 新しい container.xml を作成（mscx のみ参照）
+            // MS3 は .mss / .json 等のMS4固有ファイルを認識しないため除外する
+            // =========================================================
             const newContainerXml = `<?xml version="1.0" encoding="UTF-8"?>\n<container>\n  <rootfiles>\n    <rootfile full-path="${mscxPath}"/>\n  </rootfiles>\n</container>`;
 
-            // 5. 新しい ZIP(mscz) の作成
+            // 5. 新しい ZIP(mscz) の作成（mscx と container.xml のみ）
             const newZip = new JSZip();
             newZip.file(mscxPath, mscxContent);
             newZip.file("META-INF/container.xml", newContainerXml);
 
             // 6. ダウンロード処理
-            const zipContentBlob = await newZip.generateAsync({ type: "blob", compression: "DEFLATE" });
-            const content = new Blob([zipContentBlob], { type: "application/octet-stream" });
+            const zipBlob = await newZip.generateAsync({ type: "blob", compression: "DEFLATE" });
+            logInfo(`出力ZIPサイズ: ${zipBlob.size.toLocaleString()} bytes`);
 
-            const downloadUrl = URL.createObjectURL(content);
+            const downloadUrl = URL.createObjectURL(new Blob([zipBlob], { type: "application/octet-stream" }));
             const a = document.createElement("a");
-            
-            // 元のファイル名に _msc3 を付けてダウンロード
             const baseName = file.name.replace(/\.mscz$/i, '').replace(/\.zip$/i, '');
             a.href = downloadUrl;
             a.download = `${baseName}_msc3.mscz`;
             document.body.appendChild(a);
             a.click();
-            
-            // Safari向けに少し遅延させてクリーンアップ
             setTimeout(() => {
                 document.body.removeChild(a);
                 URL.revokeObjectURL(downloadUrl);
-                fileInput.value = ''; // ダウンロード完了後にもリセットし、続けて同じファイルを変換できるようにする
+                fileInput.value = '';
             }, 100);
 
+            logOk('=== 変換完了 ===');
             showStatus('green', '変換完了！ダウンロードが開始されました。');
 
         } catch (error) {
-            console.error(error);
+            logError(`例外発生: ${error.message}`);
+            if (error.stack) logError(`スタックトレース:\n${error.stack}`);
             showStatus('red', 'エラーが発生しました: ' + error.message);
-            fileInput.value = ''; // エラー発生時もリセット
+            fileInput.value = '';
         }
     }
 
+    // =========================================================
+    // [DEBUG] MS3参照ファイル解析 & 差分比較
+    // 変換済みファイルと正常なMS3ファイルの構造を比較してMS4固有要素の残存を検出する
+    // =========================================================
+    const refDropZone  = document.getElementById('refDropZone');
+    const refFileInput = document.getElementById('refFileInput');
+    const refStatus    = document.getElementById('refStatus');
+
+    refDropZone.addEventListener('click', () => { if (DEBUG) refFileInput.click(); });
+    refDropZone.addEventListener('dragover',  e => { e.preventDefault(); if (DEBUG) refDropZone.classList.add('dragover'); });
+    refDropZone.addEventListener('dragleave', ()  => refDropZone.classList.remove('dragover'));
+    refDropZone.addEventListener('drop', e => {
+        e.preventDefault();
+        refDropZone.classList.remove('dragover');
+        if (DEBUG && e.dataTransfer.files.length > 0) analyzeRefFile(e.dataTransfer.files[0]);
+    });
+    refFileInput.addEventListener('change', e => {
+        if (DEBUG && e.target.files.length > 0) analyzeRefFile(e.target.files[0]);
+    });
+
+    // ドキュメント内の全ユニーク要素名を収集する
+    function collectTagNames(node, result = new Set()) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+            result.add(node.tagName);
+            for (const child of node.childNodes) collectTagNames(child, result);
+        }
+        return result;
+    }
+
+    // 指定要素の直接子要素名の出現数を返す
+    function childTagCounts(parent) {
+        const counts = {};
+        for (const child of parent.children) {
+            counts[child.tagName] = (counts[child.tagName] || 0) + 1;
+        }
+        return counts;
+    }
+
+    // mscxテキストからスキーマ情報（要素名一覧・構造サマリー）を抽出する
+    function extractSchema(mscxText, label) {
+        const doc = new DOMParser().parseFromString(mscxText, 'text/xml');
+        const err = doc.querySelector('parsererror');
+        if (err) { logError(`[${label}] XMLパースエラー: ${err.textContent.trim().slice(0, 200)}`); return null; }
+
+        const schema = {};
+        schema.allTags          = collectTagNames(doc);
+        const score             = doc.querySelector('Score');
+        schema.scoreChildren    = score ? childTagCounts(score) : {};
+        const firstInstrument   = doc.querySelector('Part > Instrument');
+        schema.instrumentChildren = firstInstrument ? childTagCounts(firstInstrument) : {};
+        const firstMeasure      = doc.querySelector('Measure');
+        schema.firstMeasureXml  = firstMeasure
+            ? new XMLSerializer().serializeToString(firstMeasure).slice(0, 600)
+            : '(なし)';
+        return schema;
+    }
+
+    async function analyzeRefFile(file) {
+        if (!DEBUG) return;
+        if (!file.name.endsWith('.mscz')) {
+            refStatus.textContent = 'エラー：.mscz ファイルを選択してください。';
+            refStatus.style.color = 'red';
+            refFileInput.value = '';
+            return;
+        }
+
+        refStatus.textContent = '解析中...';
+        refStatus.style.color = '#007bff';
+        logPanel.style.display = 'block';
+        logPanel.open = true;
+
+        try {
+            logInfo('');
+            logInfo('════════════════════════════════');
+            logInfo(`=== MS3参照ファイル解析開始: ${file.name} ===`);
+
+            const zip = await JSZip.loadAsync(file);
+            const containerEntry = zip.file('META-INF/container.xml');
+            if (!containerEntry) throw new Error('META-INF/container.xml が見つかりません。');
+
+            const contDoc = new DOMParser().parseFromString(await containerEntry.async('string'), 'text/xml');
+            let mscxPath = null;
+            for (const rf of contDoc.getElementsByTagName('rootfile')) {
+                const p = rf.getAttribute('full-path');
+                if (p && p.toLowerCase().endsWith('.mscx')) { mscxPath = p; break; }
+            }
+            if (!mscxPath) throw new Error('mscxファイルが見つかりません。');
+
+            const ms3Mscx = await zip.file(mscxPath).async('string');
+            logInfo(`MS3 mscxサイズ: ${ms3Mscx.length.toLocaleString()} 文字`);
+
+            const ms3Schema  = extractSchema(ms3Mscx, 'MS3');
+            if (!ms3Schema) throw new Error('MS3ファイルのXML解析に失敗しました。');
+
+            if (!window._lastConvertedMscx) {
+                logWarn('変換済みファイルがありません。先に変換を実行してください。');
+                refStatus.textContent = '先に変換を実行してください。';
+                refStatus.style.color = 'orange';
+                return;
+            }
+            const convSchema = extractSchema(window._lastConvertedMscx, '変換済み');
+            if (!convSchema) throw new Error('変換済みファイルのXML解析に失敗しました。');
+
+            // 全要素名の差分
+            logInfo('--- 全要素名の差分 ---');
+            const onlyInConv = [...convSchema.allTags].filter(t => !ms3Schema.allTags.has(t)).sort();
+            const onlyInMs3  = [...ms3Schema.allTags].filter(t => !convSchema.allTags.has(t)).sort();
+            if (onlyInConv.length) logWarn(`変換済みにのみ存在（MS4固有の可能性）:\n  ${onlyInConv.join(', ')}`);
+            else                   logOk('変換済みにのみ存在する要素名: なし');
+            if (onlyInMs3.length)  logWarn(`MS3にのみ存在（変換で失われた要素の可能性）:\n  ${onlyInMs3.join(', ')}`);
+            else                   logOk('MS3にのみ存在する要素名: なし');
+
+            // Score直下の比較
+            logInfo('--- <Score>直下の子要素の比較 ---');
+            const allScoreKeys = new Set([...Object.keys(ms3Schema.scoreChildren), ...Object.keys(convSchema.scoreChildren)]);
+            for (const k of [...allScoreKeys].sort()) {
+                const ms3v = ms3Schema.scoreChildren[k] || 0, convv = convSchema.scoreChildren[k] || 0;
+                if (ms3v !== convv) logWarn(`  <${k}>: MS3=${ms3v}件 / 変換済み=${convv}件`);
+            }
+
+            // Instrument直下の比較
+            logInfo('--- <Instrument>直下の子要素の比較 ---');
+            const allInstrKeys = new Set([...Object.keys(ms3Schema.instrumentChildren), ...Object.keys(convSchema.instrumentChildren)]);
+            for (const k of [...allInstrKeys].sort()) {
+                const ms3v = ms3Schema.instrumentChildren[k] || 0, convv = convSchema.instrumentChildren[k] || 0;
+                if (ms3v !== convv) logWarn(`  <${k}>: MS3=${ms3v}件 / 変換済み=${convv}件`);
+            }
+
+            // 最初のMeasureのXML比較
+            logInfo('--- 最初の<Measure>の比較 ---');
+            logInfo(`[MS3 ] ${ms3Schema.firstMeasureXml}`);
+            logInfo(`[変換] ${convSchema.firstMeasureXml}`);
+
+            logOk('=== MS3参照ファイル解析完了 ===');
+            refStatus.textContent = '解析完了。ログを確認してください。';
+            refStatus.style.color = 'green';
+
+        } catch (error) {
+            logError(`MS3解析エラー: ${error.message}`);
+            refStatus.textContent = 'エラー: ' + error.message;
+            refStatus.style.color = 'red';
+        }
+        refFileInput.value = '';
+    }
+
+    // =========================================================
     // ステータス表示の共通関数
+    // =========================================================
     function showStatus(color, message) {
         statusMsg.style.color = color;
         statusMsg.innerText = message;
-        // エラーか完了の場合は背景色をつけて分かりやすく
-        if (color === 'red') {
-            statusMsg.style.backgroundColor = '#fff2f2';
-        } else if (color === 'green') {
-            statusMsg.style.backgroundColor = '#f2fff2';
-        } else {
-            statusMsg.style.backgroundColor = 'transparent';
-        }
+        if (color === 'red')        statusMsg.style.backgroundColor = '#fff2f2';
+        else if (color === 'green') statusMsg.style.backgroundColor = '#f2fff2';
+        else                        statusMsg.style.backgroundColor = 'transparent';
     }
 </script>
 
